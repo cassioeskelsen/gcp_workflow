@@ -22,7 +22,7 @@ main:
               result: check_person_exists_result
           - switch_check:
               switch:
-                - condition: ${check_person_exists_result.body.person_exists == True}
+                - condition: ${check_person_exists_result.body.person_exists == true}
                   next: score_person
 
     - identify_person:
