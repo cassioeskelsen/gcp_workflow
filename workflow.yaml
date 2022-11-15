@@ -1,0 +1,136 @@
+main:
+  params: [ event ]
+  steps:
+    - init:
+        assign:
+          - project: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - sucess_topic: "sucess-topic"
+          - not_sucess_topic: "not-sucess-topic"
+    - decode_pubsub_message:
+        assign:
+          - event_base64: ${base64.decode(event.data.message.data)}
+          - rent_request: ${json.decode(text.decode(event_base64))}
+
+    - check_person_exists:
+        steps:
+          - check:
+              call: http.post
+              args:
+                url: https://us-central1-real-state-wf.cloudfunctions.net/check_person_exists
+                body:
+                  person_id: ${rent_request.person_id}
+              result: check_person_exists_result
+          - switch_check:
+              switch:
+                - condition: ${check_person_exists_result.body.person_exists == True}
+                  next: score_person
+
+    - identify_person:
+        steps:
+          - identify:
+              call: http.post
+              args:
+                url: https://us-central1-real-state-wf.cloudfunctions.net/identify_person
+                body:
+                  person_id: ${rent_request.person_id}
+                  photo_id: ${rent_request.photo_id}
+              result: identify_person_exists_result
+          - switch_identify:
+              switch:
+                - condition: ${not(identify_person_exists_result.body.identified)}
+                  next: cant_identified
+
+    - score_person:
+        steps:
+          - calc_score:
+              call: http.post
+              args:
+                url: https://us-central1-real-state-wf.cloudfunctions.net/score_person
+                body:
+                  person_id: ${rent_request.person_id}
+              result: score_person_result
+          - switch_score:
+              switch:
+                - condition: ${score_person_result.body.score >= 80}
+                  next: reserve_house
+                - condition: ${score_person_result.body.score >= 40 and score_person_result.body.score < 80}
+                  next: request_guarantor
+                - condition: ${score_person_result.body.score < 40}
+                  next: not_approved
+
+    - reserve_house:
+        steps:
+          - try_reserve:
+              call: http.post
+              args:
+                url: https://us-central1-real-state-wf.cloudfunctions.net/reserve_house
+                body:
+                  person_id: ${rent_request.person_id}
+                  house_id: ${rent_request.house_id}
+              result: reserve_house_result
+          - switch_reserve:
+              switch:
+                - condition: ${reserve_house_result.body.result == true}
+                  next: rental_approved
+                - condition: ${reserve_house_result.body.result == false}
+                  next: rental_not_possible
+
+    - cant_identified:
+        assign:
+          - final_result: "Can't identified person"
+        next: not_sucess
+
+    - not_approved:
+        assign:
+          - final_result: "Can't approve - low score"
+        next: not_sucess
+
+    - request_guarantor:
+        assign:
+          - final_result: "Request guarantor"
+        next: not_sucess
+
+    - rental_not_possible:
+        assign:
+          - final_result: "House reserved or already rented"
+        next: not_sucess
+
+    - not_sucess:
+        steps:
+          - prep_vars_not_sucess:
+              assign:
+                - msg: ${"{ 'person_id':"+ rent_request.person_id + ",'person_email':"+rent_request.person_email+",'house_id':"+ rent_request.house_id+", 'not_sucess_reason':" +final_result + "}"}
+                - base64_msg: ${base64.encode(json.encode(msg))}
+          - publish_not_sucess:
+              call: googleapis.pubsub.v1.projects.topics.publish
+              args:
+                topic: ${"projects/" + project + "/topics/" + not_sucess_topic}
+                body:
+                  messages:
+                    - data: ${base64_msg}
+          - finish:
+              next: return_result
+
+    - rental_approved:
+        steps:
+          - prep_vars_sucess:
+              assign:
+                - msg: { "person_id": rent_request.person_id,"person_email": rent_request.person_email, "house_id": rent_request.house_id }
+                - base64_msg: ${base64.encode(json.encode(msg))}
+          - publish_sucess:
+              call: googleapis.pubsub.v1.projects.topics.publish
+              args:
+                topic: ${"projects/" + project + "/topics/" + sucess_topic}
+                body:
+                  messages:
+                    - data: ${base64_msg}
+
+    - return_result:
+        steps:
+          - log:
+              call: sys.log
+              args:
+                text: ${final_result}
+                severity: INFO
+          - return:
+              return: ${final_result}
